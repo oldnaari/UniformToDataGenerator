@@ -4,6 +4,7 @@ import pathlib
 import tqdm.auto as tqdm
 import numpy as np
 import imageio
+import dataclasses
 
 __all__ = ["train"]
 
@@ -23,7 +24,7 @@ def dy(t: torch.Tensor) -> torch.Tensor:
 def estimate_density(init_density: torch.Tensor,
                      x: torch.Tensor,
                      y: torch.Tensor) -> torch.Tensor:
-    eps = 1e-9
+    eps = 1e-12
     u = (x[:, 1:] + x[:, :-1]) / 2
     v = (y[1:, :] + y[:-1, :]) / 2
     u = (u[1:, :] + u[:-1, :]) / 2
@@ -31,10 +32,11 @@ def estimate_density(init_density: torch.Tensor,
     uv = torch.stack([u, v], dim=-1)
     density_warped = torch.nn.functional.grid_sample(
         init_density[None, None].float(), uv[None])
-    density_estimated = density_warped * torch.maximum(
-        torch.abs(dx(x) * dy(y) - dx(y) * dy(x)), torch.tensor(eps)
+    density_estimated = density_warped * (
+        torch.abs(dx(x) * dy(y) - dx(y) * dy(x))
     )
-    return density_estimated / torch.sum(density_estimated)
+    return density_estimated / torch.maximum(torch.sum(density_estimated),
+                                             torch.tensor(eps))
 
 
 def compute_xy(x_inc, y_inc):
@@ -62,7 +64,15 @@ def convert_image_to_density(img: np.ndarray) -> np.ndarray:
     return density
 
 
-def train(init_density: np.ndarray, n_iter=10000) -> np.ndarray:
+@dataclasses.dataclass
+class Log:
+    result_images: list = dataclasses.field(default_factory=list)
+    loss_values: list = dataclasses.field(default_factory=list)
+
+def guided_std(tensor):
+    return torch.std(tensor)
+
+def train(init_density: np.ndarray, n_iter=1000, logger: Log=None) -> np.ndarray:
     """
     :param init_density:
     A square array of point density values of shape [H, W=H]
@@ -80,13 +90,19 @@ def train(init_density: np.ndarray, n_iter=10000) -> np.ndarray:
     if n_iter <= 0:
         raise ValueError("n_iter must be > 0")
 
-    for _ in tqdm.trange(n_iter):
+    progress_bar = tqdm.trange(n_iter)
+    for _ in progress_bar:
         x, y = compute_xy(x_inc, y_inc)
         optimizer.zero_grad()
         pred_density = estimate_density(init_density, x, y)
-        loss = torch.std(pred_density)
+        loss = guided_std(pred_density)
         loss.backward()
         optimizer.step()
+
+        if logger is not None:
+            logger.loss_values.append(loss.item())
+            logger.result_images.append(pred_density.cpu().detach())
+        progress_bar.set_description(f"L = {loss.item()}")
 
     return torch.stack([x, y], dim=-1).detach().cpu().numpy()
 
@@ -116,7 +132,14 @@ if __name__ == '__main__':
         image = 1.0 - image
 
     original_density = convert_image_to_density(image)
-    coordinate_map = train(original_density)
+
+    logger = Log()
+    coordinate_map = train(original_density, logger=logger)
+
+    frames_to_save = [f[0, 0, ..., None][..., [0] * 3] for f in logger.result_images]
+    frames_to_save = [f * (f.shape[0] * f.shape[1] * 0.1) for f in frames_to_save]
+    frames_to_save = [np.uint8(np.clip(f * 255, 0, 255)) for f in frames_to_save]
+    imageio.mimsave("training-history.mp4", frames_to_save)
 
     np.save(args.output, coordinate_map)
 

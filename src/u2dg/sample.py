@@ -16,6 +16,7 @@ def transform(grid: np.ndarray[[Literal["H"], Literal["W"], Literal[2]], np.dtyp
     :return:
     """
 
+    grid = np.moveaxis(grid, -1, 0)[None]
     queries = torch.tensor(queries, dtype=torch.float32)
     grid = torch.tensor(grid, dtype=torch.float32)
 
